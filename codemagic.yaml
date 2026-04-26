@@ -6,9 +6,32 @@ workflows:
       flutter: 3.19.0
       java: 17
     scripts:
+      - name: Save custom files
+        script: |
+          mkdir -p /tmp/vvf/lib /tmp/vvf/assets
+          cp lib/main.dart /tmp/vvf/lib/main.dart
+          cp pubspec.yaml /tmp/vvf/pubspec.yaml
+          cp android/app/src/main/AndroidManifest.xml /tmp/vvf/AndroidManifest.xml
+          cp assets/logo.jpg /tmp/vvf/logo.jpg 2>/dev/null || echo "no logo"
+
+      - name: Generate Flutter scaffold
+        script: |
+          flutter create --org com.vishwavijayaa --project-name vvf_duplicate_finder /tmp/scaffold
+          rsync -av /tmp/scaffold/ . --exclude='.git' --exclude='lib/' --exclude='pubspec.yaml'
+
+      - name: Restore custom files
+        script: |
+          cp /tmp/vvf/lib/main.dart lib/main.dart
+          cp /tmp/vvf/pubspec.yaml pubspec.yaml
+          cp /tmp/vvf/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          mkdir -p assets
+          cp /tmp/vvf/logo.jpg assets/logo.jpg 2>/dev/null || echo "no logo"
+
       - name: Get packages
         script: flutter pub get
+
       - name: Build APK
         script: flutter build apk --debug
+
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
