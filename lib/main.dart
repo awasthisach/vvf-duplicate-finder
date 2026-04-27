@@ -95,23 +95,40 @@ class ScannerService {
     }
 
     final List<FileSystemEntity> entities = [];
-    int skippedCount = 0;
+    // BFS: प्रत्येक directory अलग try-catch में
+    // recursive:true से पहली error पर पूरी scan रुक जाती थी
+    // BFS में एक directory fail हो तो बाकी scan चलती रहती है
+    final bfsQueue = <Directory>[dir];
+    int scannedDirs = 0;
 
-    try {
-      await for (final entity in dir.list(recursive: true, followLinks: false)) {
-        if (entity is File) {
-          final ext = p.extension(entity.path).toLowerCase();
-          if (selectedExtensions.contains(ext)) {
-            entities.add(entity);
+    while (bfsQueue.isNotEmpty) {
+      final current = bfsQueue.removeAt(0);
+      scannedDirs++;
+      if (scannedDirs % 50 == 0) {
+        onProgress('फोल्डर: $scannedDirs  •  फाइलें: ${entities.length}');
+      }
+      try {
+        await for (final entity
+            in current.list(recursive: false, followLinks: false)) {
+          if (entity is File) {
+            final ext = p.extension(entity.path).toLowerCase();
+            if (selectedExtensions.contains(ext)) {
+              entities.add(entity);
+            }
+          } else if (entity is Directory) {
+            final name = p.basename(entity.path);
+            if (!_isSystemDir(name)) {
+              bfsQueue.add(entity);
+            }
           }
         }
+      } catch (_) {
+        // यह directory skip — बाकी जारी
       }
-    } catch (e) {
-      skippedCount++;
     }
 
     if (entities.isEmpty) {
-      yield '⚠ कोई फाइल नहीं मिली — अनुमति जाँचें';
+      yield '⚠ कोई फाइल नहीं मिली ($scannedDirs फोल्डर देखे)';
       onDone([], []);
       return;
     }
@@ -202,6 +219,15 @@ class ScannerService {
 
     yield 'नियर-डुप्लीकेट जोड़े: ${nearDuplicates.length}';
     onDone(exactDuplicates, nearDuplicates);
+  }
+
+  // System directories जो scan में skip होनी चाहिए
+  static bool _isSystemDir(String name) {
+    const skip = {
+      'Android',  // app-specific data (बहुत बड़ा, user files नहीं)
+      'proc', 'sys', 'dev', 'acct', 'cache',
+    };
+    return skip.contains(name) || name.startsWith('.');
   }
 
   static double _jaccardSimilarity(String text1, String text2) {
@@ -331,23 +357,57 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // ── FIX: Get real external storage path ──
+  // ── FIX: Get real external storage path (robust for all devices) ──
   Future<void> _initPath() async {
     try {
       final dir = await getExternalStorageDirectory();
-      // getExternalStorageDirectory returns something like
-      // /storage/emulated/0/Android/data/... — we want the root
-      // So we strip back to /storage/emulated/0/
+      // getExternalStorageDirectory returns app-specific path like:
+      //   /storage/emulated/0/Android/data/com.x.y/files  (standard)
+      //   /sdcard/Android/data/com.x.y/files              (some older devices)
+      // We cut everything before "Android/" to get storage root.
       if (dir != null) {
-        final parts = dir.path.split('/');
-        // Find index of 'emulated' or use index 1-3
-        final rootParts = parts.take(4).join('/'); // /storage/emulated/0
+        final path = dir.path;
+        final androidIdx = path.indexOf('/Android/');
+        final rootPath = androidIdx > 0
+            ? path.substring(0, androidIdx)   // e.g. /storage/emulated/0
+            : '/storage/emulated/0';           // fallback
         if (mounted) {
-          setState(() => scanPath = '$rootParts/');
+          setState(() => scanPath = '$rootPath/');
         }
       }
     } catch (_) {
       // fallback stays /storage/emulated/0/
+    }
+  }
+
+  // SD card का actual mount path ढूंढें
+  // getExternalStorageDirectories() primary के अलावा SD card paths देता है
+  Future<void> _initSdPath() async {
+    try {
+      final dirs = await getExternalStorageDirectories();
+      if (dirs != null && dirs.length > 1) {
+        // index 0 = primary (internal), index 1+ = SD card
+        final sdDir = dirs[1];
+        final path = sdDir.path;
+        final androidIdx = path.indexOf('/Android/');
+        final rootPath = androidIdx > 0
+            ? path.substring(0, androidIdx)
+            : path;
+        setState(() => scanPath = '$rootPath/');
+      } else {
+        // SD card नहीं मिली — internal storage पर fallback
+        setState(() => scanPath = '/storage/emulated/0/');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('SD कार्ड नहीं मिला — फोन स्टोरेज स्कैन होगी'),
+              backgroundColor: kRed,
+            ),
+          );
+        }
+      }
+    } catch (_) {
+      setState(() => scanPath = '/storage/emulated/0/');
     }
   }
 
@@ -472,10 +532,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         label: 'SD कार्ड',
                         subtitle: 'बाहरी स्टोरेज',
                         value: isSDCard,
-                        onTap: () => setState(() {
-                          isSDCard = true;
-                          scanPath = '/storage/';
-                        }),
+                        onTap: () async {
+                          await _initSdPath();
+                          setState(() => isSDCard = true);
+                        },
                       ),
                     ],
                   ),
