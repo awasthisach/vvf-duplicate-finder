@@ -36,7 +36,7 @@ workflows:
             -storepass vvfpass123 \
             -keypass vvfpass123 \
             -dname "CN=VVF,O=VishwaVijayaa,C=IN"
-          
+
           cat > android/key.properties << EOF
           storePassword=vvfpass123
           keyPassword=vvfpass123
@@ -47,19 +47,53 @@ workflows:
       - name: Configure signing in build.gradle
         script: |
           cat > android/app/build.gradle << 'EOF'
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          def localProperties = new Properties()
+          def localPropertiesFile = rootProject.file('local.properties')
+          if (localPropertiesFile.exists()) {
+              localPropertiesFile.withReader('UTF-8') { reader ->
+                  localProperties.load(reader)
+              }
+          }
+
+          def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '1'
+          def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
+
           def keyProps = new Properties()
           def keyFile = rootProject.file('key.properties')
           if (keyFile.exists()) keyProps.load(new FileInputStream(keyFile))
 
           android {
-              compileSdkVersion 34
+              namespace "com.vishwavijayaa.vvf_duplicate_finder"
+              compileSdk flutter.compileSdkVersion
+              ndkVersion flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+
+              sourceSets {
+                  main.java.srcDirs += 'src/main/kotlin'
+              }
+
               defaultConfig {
                   applicationId "com.vishwavijayaa.vvf_duplicate_finder"
                   minSdkVersion 21
-                  targetSdkVersion 34
-                  versionCode 1
-                  versionName "1.0"
+                  targetSdkVersion flutter.targetSdkVersion
+                  versionCode flutterVersionCode.toInteger()
+                  versionName flutterVersionName
               }
+
               signingConfigs {
                   release {
                       keyAlias keyProps['keyAlias']
@@ -68,6 +102,7 @@ workflows:
                       storePassword keyProps['storePassword']
                   }
               }
+
               buildTypes {
                   release {
                       signingConfig signingConfigs.release
@@ -76,6 +111,12 @@ workflows:
                   }
               }
           }
+
+          flutter {
+              source '../..'
+          }
+
+          dependencies {}
           EOF
 
       - name: Get packages
