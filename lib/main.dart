@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 void main() {
   runApp(const VVFApp());
@@ -109,7 +110,6 @@ class ScannerService {
       skippedCount++;
     }
 
-    // ── FIX: Show clear message if nothing found ──
     if (entities.isEmpty) {
       yield '⚠ कोई फाइल नहीं मिली — अनुमति जाँचें';
       onDone([], []);
@@ -150,7 +150,6 @@ class ScannerService {
       }
     }
 
-    // ── FIX: Report read errors ──
     if (readErrors > 0) {
       onProgress('$readErrors फाइलें पढ़ने में त्रुटि (अनुमति?)');
     }
@@ -311,10 +310,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     '.txt', '.md', '.pdf', '.docx', '.doc',
   };
   double threshold = 0.80;
+
+  // ── FIX: Use actual path from path_provider ──
   String scanPath = '/storage/emulated/0/';
   bool isSDCard = false;
-
-  // ── FIX: Track permission status ──
   bool _permissionGranted = false;
   bool _waitingForSettings = false;
 
@@ -322,6 +321,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _initPath();
     _checkPermission();
   }
 
@@ -331,7 +331,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // ── FIX: Re-check permission when user returns from Settings ──
+  // ── FIX: Get real external storage path ──
+  Future<void> _initPath() async {
+    try {
+      final dir = await getExternalStorageDirectory();
+      // getExternalStorageDirectory returns something like
+      // /storage/emulated/0/Android/data/... — we want the root
+      // So we strip back to /storage/emulated/0/
+      if (dir != null) {
+        final parts = dir.path.split('/');
+        // Find index of 'emulated' or use index 1-3
+        final rootParts = parts.take(4).join('/'); // /storage/emulated/0
+        if (mounted) {
+          setState(() => scanPath = '$rootParts/');
+        }
+      }
+    } catch (_) {
+      // fallback stays /storage/emulated/0/
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _waitingForSettings) {
@@ -425,7 +444,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             sliver: SliverList(
               delegate: SliverChildListDelegate([
 
-                // ── FIX: Permission Status Banner ──
+                // ── Permission Status Banner ──
                 if (!_permissionGranted) ...[
                   _PermissionBanner(
                     onGrantPress: _requestPermission,
@@ -443,10 +462,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         label: 'फोन स्टोरेज',
                         subtitle: '/storage/emulated/0/',
                         value: !isSDCard,
-                        onTap: () => setState(() {
-                          isSDCard = false;
-                          scanPath = '/storage/emulated/0/';
-                        }),
+                        onTap: () async {
+                          await _initPath();
+                          setState(() => isSDCard = false);
+                        },
                       ),
                       const Divider(color: kSurface),
                       _ToggleRow(
@@ -612,77 +631,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // ── FIX: Step-by-step permission request ──
+  // ══════════════════════════════════════════
+  // FIX: Correct permission request flow
+  // Android 11+ के लिए MANAGE_EXTERNAL_STORAGE
+  // एक special page खोलता है — openAppSettings() नहीं
+  // ══════════════════════════════════════════
   Future<void> _requestPermission() async {
-    // Step 1: Try MANAGE_EXTERNAL_STORAGE (Android 11+)
-    final manageStatus = await Permission.manageExternalStorage.status;
+    // Step 1: Android 11+ — MANAGE_EXTERNAL_STORAGE
+    // यह call automatically "All Files Access" वाला special settings page खोलती है
+    final manageStatus = await Permission.manageExternalStorage.request();
 
     if (manageStatus.isGranted) {
-      setState(() => _permissionGranted = true);
+      if (mounted) setState(() => _permissionGranted = true);
       return;
     }
 
-    // Step 2: If denied but not permanently — request it
-    if (!manageStatus.isPermanentlyDenied) {
-      final result = await Permission.manageExternalStorage.request();
-      if (result.isGranted) {
-        setState(() => _permissionGranted = true);
-        return;
-      }
-    }
+    // Step 2: अगर granted नहीं हुई — user को wait करने के लिए flag set करें
+    // जब वो settings से वापस आए तो didChangeAppLifecycleState re-check करेगा
+    _waitingForSettings = true;
 
-    // Step 3: Need to open Settings (Android 11+ always needs this for MANAGE)
-    if (mounted) {
-      await showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          backgroundColor: kCardBg,
-          title: const Text('अनुमति आवश्यक है',
-              style: TextStyle(color: kGold)),
-          content: const Text(
-            'फाइल स्कैन के लिए "All Files Access" अनुमति चाहिए।\n\n'
-            'नीचे "Settings खोलें" दबाएं, फिर:\n'
-            '• "All Files Access" या\n'
-            '• "Files and Media" > "Allow All"\n\n'
-            'Allow करने के बाद वापस आएं।',
-            style: TextStyle(color: kTextSecondary, height: 1.5),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('बाद में',
-                  style: TextStyle(color: kTextSecondary)),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _waitingForSettings = true;
-                openAppSettings();
-              },
-              style:
-                  ElevatedButton.styleFrom(backgroundColor: kOrange),
-              child: const Text('Settings खोलें'),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // Step 4: Fallback — try regular storage permission (Android 10 and below)
+    // Step 3: Android 10 और उससे पुराने के लिए fallback
     final storageStatus = await Permission.storage.request();
     if (storageStatus.isGranted) {
-      setState(() => _permissionGranted = true);
+      if (mounted) setState(() => _permissionGranted = true);
     }
   }
 
-  // ── FIX: Scan only after confirming permission ──
   void _startScan() async {
-    // Re-check permission fresh before scanning
     await _checkPermission();
 
     if (!_permissionGranted) {
       await _requestPermission();
-      // Re-check after request attempt
       await _checkPermission();
       if (!_permissionGranted) return;
     }
@@ -726,7 +705,7 @@ class _PermissionBanner extends StatelessWidget {
               Icon(Icons.lock_outline, color: kRed, size: 18),
               SizedBox(width: 8),
               Text(
-                'स्टोरेज अनुमति नहीं दी गई',
+                '"All Files Access" अनुमति नहीं दी',
                 style: TextStyle(
                     color: kRed,
                     fontWeight: FontWeight.bold,
@@ -736,8 +715,8 @@ class _PermissionBanner extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           const Text(
-            'बिना अनुमति के स्कैन काम नहीं करेगी। नीचे बटन दबाएं।',
-            style: TextStyle(color: kTextSecondary, fontSize: 12),
+            'नीचे बटन दबाएं → "All Files Access" वाला page खुलेगा → Allow करें → वापस आएं।',
+            style: TextStyle(color: kTextSecondary, fontSize: 12, height: 1.5),
           ),
           const SizedBox(height: 12),
           SizedBox(
@@ -745,7 +724,7 @@ class _PermissionBanner extends StatelessWidget {
             child: ElevatedButton.icon(
               onPressed: onGrantPress,
               icon: const Icon(Icons.security, size: 16),
-              label: const Text('अनुमति दें'),
+              label: const Text('All Files Access दें'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: kRed,
                 padding:
@@ -784,8 +763,6 @@ class _ScanScreenState extends State<ScanScreen> {
   bool scanning = true;
   String progressMsg = 'स्कैन शुरू हो रहा है...';
   String activeTab = 'exact';
-
-  // ── FIX: Track if scan found 0 files (permission issue) ──
   bool _zeroFilesFound = false;
 
   @override
@@ -821,7 +798,6 @@ class _ScanScreenState extends State<ScanScreen> {
             exactDuplicates = exact;
             nearDuplicates = near;
             scanning = false;
-            // ── FIX: Detect zero-file result ──
             _zeroFilesFound = exact.isEmpty && near.isEmpty;
           });
         }
@@ -889,11 +865,12 @@ class _ScanScreenState extends State<ScanScreen> {
   Widget _buildResults() {
     return Column(
       children: [
-        // ── FIX: Zero files warning ──
         if (_zeroFilesFound && exactDuplicates.isEmpty && nearDuplicates.isEmpty)
           _ZeroFilesWarning(
             scanPath: widget.scanPath,
-            onOpenSettings: openAppSettings,
+            onOpenSettings: () async {
+              await Permission.manageExternalStorage.request();
+            },
             onRescan: _runScan,
           ),
 
@@ -985,7 +962,6 @@ class _ScanScreenState extends State<ScanScreen> {
 
           const SizedBox(height: 12),
 
-          // ── LIST ──
           Expanded(
             child:
                 activeTab == 'exact' ? _buildExactList() : _buildNearList(),
@@ -1313,8 +1289,7 @@ class _ZeroFilesWarning extends StatelessWidget {
       ),
       child: Column(
         children: [
-          Icon(Icons.warning_amber_rounded,
-              color: kRed, size: 48),
+          const Icon(Icons.warning_amber_rounded, color: kRed, size: 48),
           const SizedBox(height: 12),
           const Text(
             'कोई फाइल नहीं मिली',
@@ -1324,9 +1299,8 @@ class _ZeroFilesWarning extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             'स्कैन पाथ: $scanPath\n\n'
-            'संभावित कारण:\n'
-            '• "All Files Access" अनुमति नहीं दी\n'
-            '• Settings > Apps > VVF Duplicate Finder > Permissions > Files and Media > Allow All',
+            '"All Files Access" अनुमति दें:\n'
+            'नीचे बटन दबाएं → system page खुलेगा → Allow करें।',
             style: const TextStyle(color: kTextSecondary, height: 1.6),
           ),
           const SizedBox(height: 16),
@@ -1335,8 +1309,8 @@ class _ZeroFilesWarning extends StatelessWidget {
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: onOpenSettings,
-                  icon: const Icon(Icons.settings, size: 16),
-                  label: const Text('Settings खोलें'),
+                  icon: const Icon(Icons.security, size: 16),
+                  label: const Text('All Files Access दें'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: kGold,
                     side: const BorderSide(color: kGold),
